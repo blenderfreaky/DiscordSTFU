@@ -87,8 +87,9 @@
 
             Console.WriteLine("\nWhen you're ready, press any key and focus into the browser within 5 seconds.");
             Console.ReadKey();
-            Console.WriteLine("\nStarting...");
+            Console.WriteLine("\nStarting int 5 seconds...");
             await Task.Delay(5000).ConfigureAwait(false);
+            Console.WriteLine("\nStarting...");
 
             foreach (var (folder, server) in toMute)
             {
