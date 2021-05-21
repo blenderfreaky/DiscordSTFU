@@ -11,104 +11,203 @@
 
     public static class Program
     {
+        public record ServerOrFolder(IWebElement Element, string Name);
+
         public static async Task Main(string[] args)
         {
             _ = args;
             using FirefoxDriver driver = new();
-            Actions actions = new(driver);
 
             driver.Navigate().GoToUrl("https://discord.com/");
 
             var wait = new WebDriverWait(driver, TimeSpan.FromMinutes(30));
-            var servers = wait.Until(x => x
+            var serverElements = wait.Until(x => x
                 .FindElement(By.CssSelector("div[aria-label=\"Servers\"]"))
-                .FindElements(By.CssSelector("div")));
+                .FindElements(By.XPath("*")));
 
-            const int delay = 100;
+            const int delay = 50;
 
-            foreach (var topServer in servers)
+            ServerOrFolder noFolder = new(null!, "No folder");
+            Dictionary<ServerOrFolder, List<ServerOrFolder>> serversByFolder = new();
+
+            List<ServerOrFolder> GetServers(ServerOrFolder folder) =>
+                serversByFolder.TryGetValue(folder, out var ret) ? ret : serversByFolder[folder] = new();
+
+            foreach (var serverOrFolder in serverElements)
             {
-                var topName = GetServerName(topServer, out var isFolder);
+                var serverOrFolderName = GetServerName(serverOrFolder, out var isFolder);
 
-                IEnumerable<(string Name, IWebElement Server)> subServers;
+                if (serverOrFolderName == null)
+                {
+                    Bruh();
+                    continue;
+                }
+
+                ServerOrFolder folder = new(serverOrFolder, serverOrFolderName);
 
                 if (isFolder)
                 {
-                    var children = topServer.FindElements(By.CssSelector("ul>div"));
+                    var children = serverOrFolder.FindElements(By.CssSelector("ul>div"));
                     if (children.Count == 0)
                     {
-                        topServer.Click();
-                        children = topServer.FindElements(By.CssSelector("ul>div"));
+                        driver.ExecuteScript("arguments[0].scrollIntoView(true);", serverOrFolder);
+                        new Actions(driver).MoveToElement(serverOrFolder).Click(serverOrFolder).Build().Perform();
+                        children = serverOrFolder.FindElements(By.CssSelector("ul>div"));
+                        serverOrFolder.Click();
                     }
 
-                    subServers = children.Select(x => (GetServerName(x, out _), x));
+                    GetServers(folder).AddRange(children.Select(x => new ServerOrFolder(x, GetServerName(x, out _)!)));
                 }
                 else
                 {
-                    subServers = new[] { (topName, topServer) };
+                    GetServers(noFolder).Add(new(serverOrFolder, serverOrFolderName!));
                 }
 
-                foreach (var (name, server) in subServers)
-                {
-                    if (!YNPrompt($"Skip Server \"{name}\"", false))
-                    {
-                        actions.ContextClick(server);
-                        await Task.Delay(delay).ConfigureAwait(false);
+                //if (isFolder) topServer.Click();
+            }
 
-                        await MuteSelectedServer(driver, delay).ConfigureAwait(false);
+            List<(ServerOrFolder? Folder, ServerOrFolder Server)> toMute = new();
+
+            foreach (var (folder, servers) in serversByFolder)
+            {
+                var anc = ANCPrompt($"Mute Folder \"{folder.Name}\"", AllNoneChoose.Choose);
+
+                if (anc == AllNoneChoose.None) continue;
+
+                foreach (var server in servers)
+                {
+                    if (anc != AllNoneChoose.All && !YNPrompt($"Mute Server \"{server.Name}\"", false))
+                    {
+                        continue;
                     }
+
+                    toMute.Add((folder, server));
                 }
             }
+
+            Console.WriteLine("\nWhen you're ready, press any key and focus into the browser within 5 seconds.");
+            Console.ReadKey();
+            Console.WriteLine("\nStarting...");
+            await Task.Delay(5000).ConfigureAwait(false);
+
+            foreach (var (folder, server) in toMute)
+            {
+                driver.ExecuteScript("arguments[0].scrollIntoView(true);", server.Element);
+                new Actions(driver).MoveToElement(server.Element).ContextClick(server.Element).Build().Perform();
+                await Task.Delay(delay).ConfigureAwait(false);
+
+                await MuteSelectedServer(driver, delay).ConfigureAwait(false);
+            }
+
+            Console.WriteLine("Done. Closing Browser.");
+            driver.Close();
         }
 
-        public static string GetServerName(IWebElement server, out bool isFolder)
+        public static string? GetServerName(IWebElement server, out bool isFolder)
         {
-            var name = server
-                .FindElement(By.CssSelector("div>div>svg>foreignObject>div"))
-                .GetAttribute("aria-label");
+            var names = server.FindElementOrDefault(By.CssSelector("div>div>svg>foreignObject>div"));
+            if (names == null) { isFolder = false; return null; }
+            var name = names.GetAttribute("aria-label");
             isFolder = name.EndsWith(", folder ");
-            return isFolder ? name[..^9] : name[1..];
+            return isFolder ? name[..^9] : name[2..];
+        }
+
+        public static IWebElement? FindElementOrDefault(this ISearchContext driver, By by)
+        {
+            var elements = driver.FindElements(by);
+            if (elements.Count == 0)
+            {
+                return null;
+            }
+
+            return elements[0];
+        }
+
+        public static bool Bruh()
+        {
+            Console.WriteLine("Experienced a serious bruh moment");
+            return true;
         }
 
         public static async Task MuteSelectedServer(IWebDriver driver, int delay)
         {
-            var elem = driver.FindElement(By.CssSelector("#guild-context-notifications > div:nth-child(1)"));
-            elem.Click();
+            var elem = driver.FindElementOrDefault(By.CssSelector("div[role=\"group\"]>div#guild-context-notifications"));
+            if (elem == null && Bruh())
+            {
+                return;
+            }
+
+            elem!.Click();
             await Task.Delay(delay).ConfigureAwait(false);
 
-            const string prefix = "div[class^=\"layer-\"]>div[class^=\"focusLock-\"]>div[class^=\"root-\"]>div[class^=\"content-\"]";
+            var c1 = driver
+                .FindElementOrDefault(By.CssSelector("div[class^=\"layer-\"]>div[class^=\"focusLock-\"]>div[class^=\"root-\"]>div[class^=\"content-\"]"))
+                ?.FindElements(By.XPath("*"));
+            if (c1 == null)
+            {
+                Bruh();
+                return;
+            }
 
-            var mute = driver.FindElement(By.CssSelector(prefix + ":nth-child(1)>div[class^=\"container-\"]>div[class^=\"labelRow-\"]>div[class^=\"control-\"]>div[class^=\"container-\"]>input"));
-            if (!mute.Selected) mute.Click();
-            await Task.Delay(delay).ConfigureAwait(false);
+            var mute = c1[0]?.FindElementOrDefault(By.CssSelector("div[class^=\"container-\"]>div[class^=\"labelRow-\"]>div[class^=\"control-\"]>div[class^=\"container-\"]>input"));
+            if (mute == null)
+            {
+                Bruh();
+            }
+            else if (!mute!.Selected)
+            {
+                mute.Click();
+                await Task.Delay(delay).ConfigureAwait(false);
+            }
 
-            var notifs = driver.FindElement(By.CssSelector(prefix + ":nth-child(2)>div[role=\"radiogroup\"]:nth-child(3)"));
-            notifs.Click();
-            await Task.Delay(delay).ConfigureAwait(false);
+            var c2 = c1[2]?.FindElements(By.XPath("*"));
+            IWebElement? MuteCheckbox(int i) => c2?[i]?
+                    .FindElementOrDefault(By.CssSelector("div[class^=\"labelRow-\"]>div[class^=\"control-\"]>div>input"));
 
-            IWebElement MuteCheckbox(int i) => driver.FindElement(By.CssSelector(prefix + ":nth-child(3)>div:nth-child(" + i + ")>div[class^=\"labelRow-\"]>div[class^=\"control-\"]>div[class^=\"container-\"]>input"));
-            var everyone = MuteCheckbox(1);
-            if (!everyone.Selected) everyone.Click();
-            await Task.Delay(delay).ConfigureAwait(false);
+            var everyone = MuteCheckbox(0);
+            if (everyone == null)
+            {
+                Bruh();
+            }
+            else if (!everyone.Selected)
+            {
+                everyone.Click();
+                await Task.Delay(delay).ConfigureAwait(false);
+            }
 
-            var mentions = MuteCheckbox(2);
-            if (!mentions.Selected) mentions.Click();
-            await Task.Delay(delay).ConfigureAwait(false);
+            var mentions = MuteCheckbox(1);
+            if (mentions == null)
+            {
+                Bruh();
+            }
+            else if (!mentions.Selected)
+            {
+                mentions.Click();
+                await Task.Delay(delay).ConfigureAwait(false);
+            }
 
-            var pushNotifs = MuteCheckbox(2);
-            if (pushNotifs.Selected) pushNotifs.Click();
-            await Task.Delay(delay).ConfigureAwait(false);
+            var done = driver.FindElementOrDefault(By.CssSelector("div[class^=\"layer-\"]>div[class^=\"focusLock-\"]>div[class^=\"root-\"]>div[class^=\"flex-\"]>button"));
+            if (done == null && Bruh())
+            {
+                return;
+            }
 
-            var done = driver.FindElement(By.CssSelector("div[class^=\"layer-\"]>div[class^=\"focusLock-\"]>div[class^=\"root-\"]>div[class^=\"flex-\"]>button"));
-            done.Click();
+            done!.Click();
             await Task.Delay(delay).ConfigureAwait(false);
         }
 
         public static bool YNPrompt(string message, string yesMessage, string noMessage, bool? defaultValue = null)
         {
             bool choice = YNPrompt(message, defaultValue);
-            if (choice) Console.WriteLine(yesMessage);
-            else Console.WriteLine(noMessage);
+            if (choice)
+            {
+                Console.WriteLine(yesMessage);
+            }
+            else
+            {
+                Console.WriteLine(noMessage);
+            }
+
             return choice;
         }
 
@@ -128,10 +227,69 @@
                 case "n":
                     return false;
                 case "":
-                    if (defaultValue != null) return defaultValue.Value;
+                    if (defaultValue != null)
+                    {
+                        return defaultValue.Value;
+                    }
+
                     break;
                 default:
-                    if (defaultValue != null && string.IsNullOrWhiteSpace(input)) return defaultValue.Value;
+                    if (defaultValue != null && string.IsNullOrWhiteSpace(input))
+                    {
+                        return defaultValue.Value;
+                    }
+
+                    break;
+            }
+
+            Console.WriteLine("Invalid option.");
+            goto ContinuePrompt;
+        }
+
+        public enum AllNoneChoose
+        {
+            All,
+            None,
+            Choose
+        }
+
+        public static AllNoneChoose ANCPrompt(string message, AllNoneChoose? defaultValue)
+        {
+            ContinuePrompt:
+            Console.Write(message + " " + (defaultValue switch
+            {
+                AllNoneChoose.All => "[(A)LL/(n)one/(c)hoose]",
+                AllNoneChoose.None => "[(a)ll/(N)ONE/(c)hoose]",
+                AllNoneChoose.Choose => "[(a)ll/(n)one/(C)HOOSE]",
+                _ => "[all/none/choose]"
+            }) + " ");
+
+            var input = Console.ReadLine();
+
+            switch (input)
+            {
+                case "A":
+                case "a":
+                    return AllNoneChoose.All;
+                case "N":
+                case "n":
+                    return AllNoneChoose.None;
+                case "C":
+                case "c":
+                    return AllNoneChoose.Choose;
+                case "":
+                    if (defaultValue != null)
+                    {
+                        return defaultValue.Value;
+                    }
+
+                    break;
+                default:
+                    if (defaultValue != null && string.IsNullOrWhiteSpace(input))
+                    {
+                        return defaultValue.Value;
+                    }
+
                     break;
             }
 
